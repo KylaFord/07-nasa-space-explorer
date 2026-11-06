@@ -5,19 +5,27 @@ const { readFileSync } = require('node:fs');
 const vm = require('node:vm');
 const { createAppServer } = require('./server');
 
-const fakeKey = 'test-only-not-a-real-nasa-key';
-const dates = '?start_date=2025-01-01&end_date=2025-01-09';
-const logo = 'https://science.nasa.gov/wp-content/themes/nasa-child/assets/images/nasa-logo@2x.png';
+const dates = '?start_date=2024-01-01&end_date=2024-12-31';
 
 function makeEntries() {
   return Array.from({ length: 9 }, (_, index) => ({
-    date: `2025-01-0${index + 1}`,
+    id: `image-${index}`,
+    date: '2024-03-01',
     title: `Entry ${index + 1}`,
     explanation: `Details ${index + 1}`,
-    media_type: index === 8 ? 'video' : 'image',
-    hdurl: index === 8 ? '' : `https://example.com/${index + 1}-hd.jpg`,
-    url: index === 8 ? 'https://example.com/video' : `https://example.com/${index + 1}.jpg`
+    media_type: 'image',
+    url: `https://images-assets.nasa.gov/image/test/${index + 1}.jpg`
   }));
+}
+
+function nasaResponse(entries, links = []) {
+  return { ok: true, json: async () => ({ collection: {
+    items: entries.map((entry) => ({
+      data: [{ nasa_id: entry.id, date_created: `${entry.date}T00:00:00Z`,
+        title: entry.title, description: entry.explanation, media_type: entry.media_type }],
+      links: [{ render: 'image', href: entry.url }]
+    })), links
+  } }) };
 }
 
 async function startTestServer(context, options) {
@@ -31,32 +39,31 @@ async function startTestServer(context, options) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
-test('proxy keeps the key server-side and exposes only public files', async (context) => {
+test('library search returns nine distinct images without any API key', async (context) => {
   let nasaUrl;
   const entries = makeEntries().reverse();
-  entries[0].explanation = `Do not expose ${fakeKey}`;
-  entries[0].internalKey = fakeKey;
   const base = await startTestServer(context, {
-    apiKey: fakeKey,
-    fetchApod: async (url) => {
+    fetchImages: async (url) => {
       nasaUrl = url;
-      return { ok: true, json: async () => entries };
+      return nasaResponse(entries);
     }
   });
-  const response = await fetch(`${base}/api/apod${dates}`);
+  const response = await fetch(`${base}/api/images${dates}`);
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
-  const body = await response.text();
-  assert.ok(!body.includes(fakeKey));
-  const publicEntries = JSON.parse(body);
+  const body = await response.json();
+  const publicEntries = body.entries;
   assert.equal(publicEntries.length, 9);
-  assert.equal(publicEntries[0].date, '2025-01-01');
-  assert.equal(publicEntries[0].hdurl, 'https://example.com/1-hd.jpg');
-  assert.equal(nasaUrl.origin + nasaUrl.pathname, 'https://api.nasa.gov/planetary/apod');
-  assert.equal(nasaUrl.searchParams.get('api_key'), fakeKey);
-  assert.equal(nasaUrl.searchParams.get('start_date'), '2025-01-01');
-  assert.equal(nasaUrl.searchParams.get('end_date'), '2025-01-09');
-  for (const privatePath of ['/.env', '/.env.local', '/server.js', '/server.test.js', '/.git/config']) {
+  assert.equal(publicEntries[0].date, '2024-03-01');
+  assert.equal(publicEntries[0].url, entries[0].url);
+  assert.equal(publicEntries[0].title, entries[0].title);
+  assert.equal(nasaUrl.origin + nasaUrl.pathname, 'https://images-api.nasa.gov/search');
+  assert.equal(nasaUrl.searchParams.has('api_key'), false);
+  assert.equal(nasaUrl.searchParams.get('year_start'), '2024');
+  assert.equal(nasaUrl.searchParams.get('year_end'), '2024');
+  assert.equal(nasaUrl.searchParams.get('media_type'), 'image');
+  assert.equal(body.searchLimited, false);
+  for (const privatePath of ['/.env', '/.env.local', '/server.js', '/server.test.js', '/.git/config', '/api/apod']) {
     assert.equal((await fetch(`${base}${privatePath}`)).status, 404);
   }
   const browserSource = await (await fetch(`${base}/js/script.js`)).text();
@@ -64,68 +71,87 @@ test('proxy keeps the key server-side and exposes only public files', async (con
   assert.ok(!browserSource.includes('api_key:'));
 });
 
-test('invalid dates, methods, and absent configuration never call NASA', async (context) => {
+test('invalid dates, methods and unsupported parameters never call NASA', async (context) => {
   let called = false;
   const base = await startTestServer(context, {
-    apiKey: '', fetchApod: async () => { called = true; }
+    fetchImages: async () => { called = true; return nasaResponse([]); }
   });
-  for (const query of ['', '?start_date=2025-01-01&end_date=2025-01-08',
-    '?start_date=2025-02-30&end_date=2025-03-10',
-    `${dates}&api_key=browser-key`, `${dates}&start_date=2025-01-01`]) {
-    assert.equal((await fetch(`${base}/api/apod${query}`)).status, 400);
+  for (const query of ['', '?start_date=2024-12-31&end_date=2024-01-01',
+    '?start_date=2024-02-30&end_date=2024-03-10',
+    '?start_date=1919-01-01&end_date=2024-01-01',
+    `${dates}&api_key=browser-key`, `${dates}&start_date=2024-01-01`]) {
+    assert.equal((await fetch(`${base}/api/images${query}`)).status, 400);
   }
-  assert.equal((await fetch(`${base}/api/apod${dates}`, { method: 'POST' })).status, 405);
-  const response = await fetch(`${base}/api/apod${dates}`);
-  assert.equal(response.status, 503);
-  assert.match((await response.json()).error, /NASA_API_KEY/);
+  assert.equal((await fetch(`${base}/api/images${dates}`, { method: 'POST' })).status, 405);
   assert.equal(called, false);
 });
 
-test('upstream errors are clear and never echo a secret', async (context) => {
-  let upstreamStatus = 401;
+test('upstream errors are clear and never echo private error details', async (context) => {
+  let upstreamStatus = 500;
   let failure;
   const base = await startTestServer(context, {
-    apiKey: fakeKey,
-    fetchApod: async () => {
+    fetchImages: async () => {
       if (failure) throw failure;
       return { ok: false, status: upstreamStatus };
     }
   });
   for (const [status, expectedStatus, message] of [
-    [401, 502, /rejected/], [403, 502, /rejected/],
     [429, 429, /rate limit/], [500, 502, /HTTP 500/]
   ]) {
     upstreamStatus = status;
-    const response = await fetch(`${base}/api/apod${dates}`);
+    const response = await fetch(`${base}/api/images${dates}`);
     assert.equal(response.status, expectedStatus);
     assert.match((await response.json()).error, message);
   }
-  failure = new Error(`Upstream URL includes ${fakeKey}`);
-  let response = await fetch(`${base}/api/apod${dates}`);
+  failure = new Error('Private upstream details');
+  let response = await fetch(`${base}/api/images${dates}`);
   assert.equal(response.status, 502);
-  assert.ok(!(await response.text()).includes(fakeKey));
+  assert.ok(!(await response.text()).includes('Private upstream details'));
   failure.name = 'TimeoutError';
-  response = await fetch(`${base}/api/apod${dates}`);
+  response = await fetch(`${base}/api/images${dates}`);
   assert.equal(response.status, 504);
 });
 
-test('logo-only and incomplete data are errors, not replacement images', async (context) => {
-  let entries = makeEntries().map((entry) => ({ ...entry, media_type: 'image', hdurl: logo, url: logo }));
+test('pagination filters exact dates, duplicate IDs, videos and unsafe images', async (context) => {
+  const entries = makeEntries();
+  let calls = 0;
   const base = await startTestServer(context, {
-    apiKey: fakeKey, fetchApod: async () => ({ ok: true, json: async () => entries })
+    fetchImages: async () => {
+      calls += 1;
+      return calls === 1 ? nasaResponse([
+        { ...entries[0], date: '2024-02-01' },
+        { ...entries[1], url: 'https://science.nasa.gov/wp-content/themes/nasa-child/assets/images/nasa-logo@2x.png' },
+        { ...entries[2], media_type: 'video' },
+        { ...entries[3], url: 'javascript:alert(1)' },
+        entries[0], entries[0]
+      ], [{ rel: 'next' }]) : nasaResponse(entries);
+    }
   });
-  let response = await fetch(`${base}/api/apod${dates}`);
-  assert.equal(response.status, 502);
-  assert.match((await response.json()).error, /website logo/);
-  entries = makeEntries();
-  entries[0].hdurl = logo;
-  response = await fetch(`${base}/api/apod${dates}`);
+  const response = await fetch(`${base}/api/images?start_date=2024-03-01&end_date=2024-03-01`);
   assert.equal(response.status, 200);
-  entries = makeEntries().slice(1);
-  assert.equal((await fetch(`${base}/api/apod${dates}`)).status, 502);
-  entries = makeEntries();
-  entries[1].date = entries[0].date;
-  assert.equal((await fetch(`${base}/api/apod${dates}`)).status, 502);
+  const body = await response.json();
+  assert.equal(body.entries.length, 9);
+  assert.equal(new Set(body.entries.map((entry) => entry.id)).size, 9);
+  assert.ok(body.entries.every((entry) => entry.date === '2024-03-01'));
+  assert.equal(calls, 2);
+});
+
+test('empty, partial, capped and malformed library results are handled honestly', async (context) => {
+  let result = nasaResponse([]);
+  let calls = 0;
+  const base = await startTestServer(context, {
+    fetchImages: async () => { calls += 1; return result; }
+  });
+  const request = () => fetch(`${base}/api/images${dates}`);
+  assert.equal((await (await request()).json()).entries.length, 0);
+  result = nasaResponse(makeEntries().slice(0, 2));
+  assert.equal((await (await request()).json()).entries.length, 2);
+  calls = 0;
+  result = nasaResponse(makeEntries().slice(0, 2), [{ rel: 'next' }]);
+  assert.equal((await (await request()).json()).searchLimited, true);
+  assert.equal(calls, 5);
+  result = { ok: true, json: async () => ({ unexpected: true }) };
+  assert.equal((await request()).status, 502);
 });
 
 test('browser sends dates only, renders each entry, and handles server errors', async () => {
@@ -141,7 +167,7 @@ test('browser sends dates only, renders each entry, and handles server errors', 
   }
   const elements = {};
   let requestedUrl;
-  let responseData = makeEntries();
+  let responseData = { entries: makeEntries() };
   let ok = true;
   let contentType = 'application/json';
   let invalidJson = false;
@@ -167,28 +193,34 @@ test('browser sends dates only, renders each entry, and handles server errors', 
   });
   vm.runInContext(readFileSync('js/dateRange.js', 'utf8'), context);
   vm.runInContext(readFileSync('js/script.js', 'utf8'), context);
-  elements.startDate.value = '2025-01-01';
-  elements.endDate.value = '2025-01-09';
+  elements.startDate.value = '2024-01-01';
+  elements.endDate.value = '2024-12-31';
   await vm.runInContext('getSpaceImages()', context);
-  assert.equal(requestedUrl, `/api/apod${dates}`);
+  assert.equal(requestedUrl, `/api/images${dates}`);
   assert.equal(elements.gallery.children.length, 9);
   elements.gallery.children.forEach((card, index) => {
-    assert.equal(card.children[2].dateTime, responseData[index].date);
+    const entry = responseData.entries[index];
+    assert.equal(card.children[1].textContent, entry.title);
+    assert.equal(card.children[2].textContent, entry.date);
+    assert.equal(card.children[2].dateTime, entry.date);
     const media = card.children[0].firstChild;
-    if (index === 8) {
-      assert.notEqual(media.tag, 'img');
-      card.listeners.click();
-      assert.equal(elements.modalMedia.children[1].href, responseData[index].url);
-    } else {
-      assert.equal(media.src, responseData[index].hdurl);
-      media.listeners.error();
-      assert.equal(media.src, responseData[index].url);
-      media.listeners.error();
-      assert.equal(media.replacement.textContent, 'Image unavailable');
-    }
+    assert.equal(media.tag, 'img');
+    assert.equal(media.src, entry.url);
+    card.listeners.click();
+    assert.equal(elements.entryModal.open, true);
+    assert.equal(elements.modalTitle.textContent, entry.title);
+    media.listeners.error();
+    assert.equal(media.replacement.textContent, 'Image unavailable');
   });
+  responseData = { entries: makeEntries().slice(0, 2), searchLimited: true };
+  await vm.runInContext('getSpaceImages()', context);
+  assert.equal(elements.gallery.children.length, 2);
+  assert.match(elements.status.textContent, /Showing 2.*500/);
+  responseData = { entries: [] };
+  await vm.runInContext('getSpaceImages()', context);
+  assert.match(elements.status.textContent, /No matching images/);
   ok = false;
-  responseData = { error: 'The server needs NASA_API_KEY configured.' };
+  responseData = { error: 'NASA library unavailable.' };
   await vm.runInContext('getSpaceImages()', context);
   assert.equal(elements.status.textContent, responseData.error);
   assert.equal(elements.gallery.children.length, 0);
@@ -210,7 +242,10 @@ test('browser sends dates only, renders each entry, and handles server errors', 
   assert.match(elements.status.textContent, /returned invalid JSON/);
 
   invalidJson = false;
-  responseData = makeEntries();
+  responseData = { entries: makeEntries() };
   await vm.runInContext('getSpaceImages()', context);
   assert.equal(elements.gallery.children.length, 9);
+  responseData = { entries: [makeEntries()[0], makeEntries()[0]] };
+  await vm.runInContext('getSpaceImages()', context);
+  assert.match(elements.status.textContent, /invalid image library records/);
 });

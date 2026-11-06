@@ -28,30 +28,20 @@ function isValidDate(value) {
     new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
 }
 
-function isWebsiteLogo(value) {
-  try {
-    const imageUrl = new URL(value);
-    return imageUrl.hostname === 'science.nasa.gov' &&
-      imageUrl.pathname === '/wp-content/themes/nasa-child/assets/images/nasa-logo@2x.png';
-  } catch {
-    return false;
-  }
-}
-
-// Return only media URLs; never relay a secret included in an upstream URL.
-function safeMediaUrl(value, apiKey) {
-  if (typeof value !== 'string' || value.includes(apiKey)) return '';
+// Library images must come from NASA's media host, without credentials.
+function safeMediaUrl(value) {
+  if (typeof value !== 'string') return '';
   try {
     const mediaUrl = new URL(value);
-    if (!['https:', 'http:'].includes(mediaUrl.protocol)) return '';
-    mediaUrl.searchParams.delete('api_key');
+    if (mediaUrl.protocol !== 'https:' || mediaUrl.hostname !== 'images-assets.nasa.gov' ||
+        mediaUrl.username || mediaUrl.password || mediaUrl.searchParams.has('api_key')) return '';
     return mediaUrl.href;
   } catch {
     return '';
   }
 }
 
-function createAppServer({ apiKey = process.env.NASA_API_KEY, fetchApod = fetch } = {}) {
+function createAppServer({ fetchImages = fetch } = {}) {
   return http.createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url, 'http://localhost');
@@ -61,7 +51,7 @@ function createAppServer({ apiKey = process.env.NASA_API_KEY, fetchApod = fetch 
         return;
       }
 
-      if (requestUrl.pathname !== '/api/apod') {
+      if (requestUrl.pathname !== '/api/images') {
         const publicFile = publicFiles.get(requestUrl.pathname);
         if (!publicFile) {
           sendJson(response, 404, { error: 'Not found.' });
@@ -81,63 +71,71 @@ function createAppServer({ apiKey = process.env.NASA_API_KEY, fetchApod = fetch 
       const startDate = requestUrl.searchParams.get('start_date');
       const endDate = requestUrl.searchParams.get('end_date');
       const today = new Date().toISOString().slice(0, 10);
-      const dayCount = (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86400000 + 1;
       if (!isValidDate(startDate) || !isValidDate(endDate) ||
-          startDate < '1995-06-16' || endDate > today || dayCount !== 9 ||
+          startDate < '1920-01-01' || endDate > today || endDate < startDate ||
           [...requestUrl.searchParams.keys()].some((name) => !['start_date', 'end_date'].includes(name)) ||
           requestUrl.searchParams.getAll('start_date').length !== 1 ||
           requestUrl.searchParams.getAll('end_date').length !== 1) {
-        sendJson(response, 400, { error: 'Select exactly nine consecutive dates within NASA\'s archive, ending no later than today.' });
-        return;
-      }
-      if (!apiKey || !apiKey.trim()) {
-        sendJson(response, 503, { error: 'The server needs NASA_API_KEY configured. Add it to the server environment and restart the app.' });
+        sendJson(response, 400, { error: 'Choose a start and end date between 1920 and today, with the end on or after the start.' });
         return;
       }
 
-      // The key is added only here, never in browser JavaScript or local requests.
-      const nasaUrl = new URL('https://api.nasa.gov/planetary/apod');
-      nasaUrl.search = new URLSearchParams({
-        api_key: apiKey,
-        start_date: startDate,
-        end_date: endDate
-      }).toString();
-      const upstream = await fetchApod(nasaUrl, { signal: AbortSignal.timeout(25000) });
-      if (!upstream.ok) {
-        const error = upstream.status === 429
-          ? 'NASA\'s API rate limit was reached. Please try again later.'
-          : [401, 403].includes(upstream.status)
-            ? 'NASA rejected the server API key. Check NASA_API_KEY in the server settings.'
-            : `NASA could not load this range (HTTP ${upstream.status}). Please try again later.`;
-        sendJson(response, upstream.status === 429 ? 429 : 502, { error });
-        return;
+      const entries = [];
+      const seenIds = new Set();
+      const signal = AbortSignal.timeout(25000);
+      let moreAvailable = false;
+      // NASA filters by year. Check exact dates locally across up to five pages.
+      for (let page = 1; page <= 5 && entries.length < 9; page += 1) {
+        const nasaUrl = new URL('https://images-api.nasa.gov/search');
+        nasaUrl.search = new URLSearchParams({
+          q: 'space', media_type: 'image',
+          year_start: startDate.slice(0, 4), year_end: endDate.slice(0, 4),
+          page: String(page), page_size: '100'
+        }).toString();
+        const upstream = await fetchImages(nasaUrl, { signal });
+        if (!upstream.ok) {
+          sendJson(response, upstream.status === 429 ? 429 : 502, {
+            error: upstream.status === 429
+              ? 'NASA\'s image library rate limit was reached. Please try again later.'
+              : `NASA's image library could not load images (HTTP ${upstream.status}). Please try again later.`
+          });
+          return;
+        }
+        const data = await upstream.json();
+        const items = data?.collection?.items;
+        if (!Array.isArray(items)) {
+          sendJson(response, 502, { error: 'NASA returned invalid image library data. Please try again later.' });
+          return;
+        }
+        for (const item of items) {
+          const entry = item?.data?.[0];
+          const date = typeof entry?.date_created === 'string' ? entry.date_created.slice(0, 10) : '';
+          const imageUrl = Array.isArray(item?.links)
+            ? item.links.filter((link) => link?.render === 'image')
+              .map((link) => safeMediaUrl(link.href)).find(Boolean)
+            : '';
+          if (entry?.media_type !== 'image' || typeof entry.nasa_id !== 'string' ||
+              !entry.nasa_id || seenIds.has(entry.nasa_id) || !isValidDate(date) ||
+              date < startDate || date > endDate || !imageUrl) continue;
+          seenIds.add(entry.nasa_id);
+          entries.push({
+            id: entry.nasa_id, date,
+            title: typeof entry.title === 'string' ? entry.title : 'Untitled NASA image',
+            explanation: typeof entry.description === 'string' ? entry.description : '',
+            media_type: 'image', url: imageUrl
+          });
+          if (entries.length === 9) break;
+        }
+        moreAvailable = Array.isArray(data.collection.links) &&
+          data.collection.links.some((link) => link?.rel === 'next');
+        if (!moreAvailable || items.length === 0) break;
       }
 
-      const entries = await upstream.json();
-      if (!Array.isArray(entries) || entries.length !== 9 || entries.some((entry) =>
-        !entry || !isValidDate(entry.date) || entry.date < startDate || entry.date > endDate
-      ) || new Set(entries.map((entry) => entry.date)).size !== 9) {
-        sendJson(response, 502, { error: 'NASA did not return all nine daily entries. Try an earlier range or try again later.' });
-        return;
-      }
-      if (entries.some((entry) => entry.media_type === 'image' &&
-        [entry.hdurl, entry.url].some(isWebsiteLogo) &&
-        ![entry.hdurl, entry.url].some((value) => safeMediaUrl(value, apiKey) && !isWebsiteLogo(value)))) {
-        sendJson(response, 502, { error: 'NASA returned its website logo instead of daily astronomy images. Please try again later; changing keys may not fix upstream data.' });
-        return;
-      }
-
-      // Whitelist response fields and redact the key if upstream text echoes it.
-      const publicEntries = entries.map((entry) => ({
-        date: entry.date,
-        title: typeof entry.title === 'string' ? entry.title.replaceAll(apiKey, '[redacted]') : '',
-        explanation: typeof entry.explanation === 'string' ? entry.explanation.replaceAll(apiKey, '[redacted]') : '',
-        media_type: entry.media_type === 'video' ? 'video' : entry.media_type === 'image' ? 'image' : 'other',
-        hdurl: safeMediaUrl(entry.hdurl, apiKey),
-        url: safeMediaUrl(entry.url, apiKey)
-      }));
-      publicEntries.sort((first, second) => first.date.localeCompare(second.date));
-      sendJson(response, 200, publicEntries);
+      entries.sort((first, second) => first.date.localeCompare(second.date));
+      sendJson(response, 200, {
+        entries,
+        searchLimited: moreAvailable && entries.length < 9
+      });
     } catch (error) {
       // Do not log or forward raw fetch errors: they may contain the secret URL.
       sendJson(response, error.name === 'TimeoutError' ? 504 : 502, {

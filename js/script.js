@@ -3,9 +3,7 @@ const startInput = document.getElementById('startDate');
 const endInput = document.getElementById('endDate');
 
 // Call the setupDateInputs function from dateRange.js
-// This sets up the date pickers to:
-// - Default to a range of 9 days (from 9 days ago to today)
-// - Restrict dates to NASA's image archive (starting from 1995)
+// Default to the previous calendar year and allow independent date choices.
 setupDateInputs(startInput, endInput);
 
 const getImagesButton = document.getElementById('getImages');
@@ -30,7 +28,6 @@ document.getElementById('spaceFact').textContent = spaceFacts[
 	Math.floor(Math.random() * spaceFacts.length)
 ];
 
-// UTC dates make the day count independent of daylight-saving changes.
 function validateDateRange() {
 	const startDate = startInput.value;
 	const endDate = endInput.value;
@@ -39,10 +36,6 @@ function validateDateRange() {
 	}
 	if (startDate < startInput.min || endDate > endInput.max || endDate < startDate) {
 		return `Choose dates from ${startInput.min} to ${endInput.max}, with the end after the start.`;
-	}
-	const dayCount = (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86400000 + 1;
-	if (dayCount !== 9) {
-		return 'Choose exactly nine consecutive days: the end must be eight days after the start. Choose an earlier start if the range reaches beyond today.';
 	}
 	return '';
 }
@@ -58,37 +51,20 @@ function getWebUrl(value) {
 	}
 }
 
-// NASA can return its website logo when the upstream APOD data is unavailable.
-function getApodImageUrl(value) {
-	const webUrl = getWebUrl(value);
-	if (!webUrl) return '';
-	const parsedUrl = new URL(webUrl);
-	if (parsedUrl.hostname === 'science.nasa.gov' &&
-			parsedUrl.pathname === '/wp-content/themes/nasa-child/assets/images/nasa-logo@2x.png') {
-		return '';
-	}
-	return webUrl;
-}
-
 function createMedia(entry) {
-	const fallbackUrl = getApodImageUrl(entry.url);
+	const fallbackUrl = getWebUrl(entry.url);
 	if (entry.media_type === 'image') {
-		const imageUrl = getApodImageUrl(entry.hdurl) || fallbackUrl;
+		const imageUrl = fallbackUrl;
 		if (imageUrl) {
 			const image = document.createElement('img');
 			image.src = imageUrl;
 			image.alt = entry.title || 'NASA astronomy image';
 			image.loading = 'lazy';
-			// Try the standard image if the high-resolution image fails.
 			image.addEventListener('error', () => {
-				if (fallbackUrl && image.src !== fallbackUrl) {
-					image.src = fallbackUrl;
-				} else {
-					const unavailable = document.createElement('p');
-					unavailable.className = 'media-placeholder';
-					unavailable.textContent = 'Image unavailable';
-					image.replaceWith(unavailable);
-				}
+				const unavailable = document.createElement('p');
+				unavailable.className = 'media-placeholder';
+				unavailable.textContent = 'Image unavailable';
+				image.replaceWith(unavailable);
 			});
 			return image;
 		}
@@ -158,12 +134,12 @@ async function getSpaceImages() {
 	endInput.disabled = true;
 	gallery.setAttribute('aria-busy', 'true');
 	statusMessage.textContent = 'Loading space images...';
-	// The server adds the private API key; the browser sends only dates.
+	// The Image Library is public: neither request needs an API key.
 	const dateParameters = new URLSearchParams({
 		start_date: startInput.value,
 		end_date: endInput.value
 	});
-	const requestUrl = `/api/apod?${dateParameters}`;
+	const requestUrl = `/api/images?${dateParameters}`;
 
 	try {
 		const response = await fetch(requestUrl, { signal: AbortSignal.timeout(30000) });
@@ -172,35 +148,38 @@ async function getSpaceImages() {
 		if (!contentType.toLowerCase().includes('application/json')) {
 			throw new Error('The API endpoint did not return JSON. Start node server.js and open the URL printed in its terminal, not Live Server or a static preview.');
 		}
-		let entries;
+		let data;
 		try {
-			entries = await response.json();
+			data = await response.json();
 		} catch {
 			throw new Error('The app server returned invalid JSON. Check that you opened the Node server URL and try again.');
 		}
 		if (!response.ok) {
-			throw new Error(typeof entries?.error === 'string'
-				? entries.error
+			throw new Error(typeof data?.error === 'string'
+				? data.error
 				: `The app server could not load this range (HTTP ${response.status}). Please try again later.`);
 		}
-		// Require one daily entry per selected date, including both endpoints.
-		if (!Array.isArray(entries) || entries.length !== 9 || entries.some((entry) =>
+		const entries = data?.entries;
+		// Library records can share dates; their NASA IDs must be different.
+		if (!Array.isArray(entries) || entries.length > 9 || entries.some((entry) =>
 			!entry || typeof entry.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(entry.date) ||
 			!Number.isFinite(Date.parse(`${entry.date}T00:00:00Z`)) ||
 			new Date(`${entry.date}T00:00:00Z`).toISOString().split('T')[0] !== entry.date ||
-			entry.date < startInput.value || entry.date > endInput.value
-		) || new Set(entries.map((entry) => entry.date)).size !== 9) {
-			throw new Error('NASA did not return all nine daily entries. Try an earlier nine-day range or try again later.');
-		}
-		// Do not present website branding as the astronomy image for each date.
-		if (entries.some((entry) => entry.media_type === 'image' &&
-			(getWebUrl(entry.hdurl) || getWebUrl(entry.url)) &&
-			!(getApodImageUrl(entry.hdurl) || getApodImageUrl(entry.url)))) {
-			throw new Error('NASA returned its website logo instead of daily astronomy images. The API data is currently unavailable. Please try again later.');
+			entry.date < startInput.value || entry.date > endInput.value ||
+			typeof entry.id !== 'string' || !entry.id || entry.media_type !== 'image' || !getWebUrl(entry.url)
+		) || new Set(entries.map((entry) => entry.id)).size !== entries.length) {
+			throw new Error('The server returned invalid image library records. Please try again.');
 		}
 		entries.sort((first, second) => first.date.localeCompare(second.date));
 		displayEntries(entries);
-		statusMessage.textContent = 'Showing nine daily entries.';
+		statusMessage.textContent = entries.length === 9
+			? 'Showing 9 images from the NASA Image and Video Library.'
+			: entries.length > 0
+				? `Showing ${entries.length} matching image${entries.length === 1 ? '' : 's'}. Try a wider date range for nine images.`
+				: 'No matching images found. Try a wider date range.';
+		if (data.searchLimited) {
+			statusMessage.textContent += ' The search checked the first 500 library records for these years.';
+		}
 	} catch (error) {
 		statusMessage.textContent = error.name === 'TimeoutError'
 			? 'NASA took too long to respond. Please try again.'
