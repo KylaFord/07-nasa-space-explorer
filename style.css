@@ -574,7 +574,9 @@ dialog::backdrop {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .gallery-item img {
+  .gallery-item img,
+  .gallery-item:hover img,
+  .gallery-item:focus-visible img {
     transition: none;
     transform: none;
   }

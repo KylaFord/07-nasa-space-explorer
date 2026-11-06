@@ -35,6 +35,16 @@ Use a Node-capable host, not GitHub Pages. The server serves only an allowlist o
 ## Automated Checks
 Run `node --test server.test.js`. Tests use mocked library responses and no API keys. They check date validation, blocked private files, NASA errors, exact date filtering, pagination, duplicate IDs, unsafe images, partial results, and browser rendering. Mocked tests alone do not prove the live NASA service is healthy.
 
+## Device Compatibility
+The layout targets current Chrome, Edge, Firefox, and Safari. Automated visual and interaction checks were run in Chromium; physical iOS/Android devices and other browser engines still need manual testing.
+
+- Verified viewport widths: 320, 375, 390, 600, 768, 844, 1024, 1440, and 1920 pixels, including phone landscape.
+- The gallery uses one column on phones, two on tablets, and three on larger screens. Date controls and navigation wrap instead of overflowing.
+- Inputs, navigation links, and action buttons have touch targets at least 44 pixels high.
+- Long titles wrap, image proportions remain stable, and the details dialog scrolls within the available screen height.
+- Browser checks cover loaded NASA images, touch-emulated phone taps, keyboard Enter/Tab/Escape, focus restoration, and reduced-motion preferences.
+- These checks do not guarantee compatibility with every older browser, embedded webview, or physical device.
+
 ## Manual Checks
 - Load the default year and confirm nine cards when enough records are available. Load a second range and confirm the gallery updates.
 - Try empty dates, reversed dates, a narrow range, and future dates. Confirm clear validation or empty-result messages.
