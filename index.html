@@ -14,18 +14,38 @@
     </header>
 
     <div class="filters">
-      <input type="date" id="startDate" />
-      <input type="date" id="endDate" />
-      <button>Get Space Images</button>
+      <label for="startDate">Start date
+        <input type="date" id="startDate" required />
+      </label>
+      <label for="endDate">End date
+        <input type="date" id="endDate" required />
+      </label>
+      <button id="getImages" type="button">Get Space Images</button>
     </div>
 
+    <p id="status" class="status" role="status" aria-live="polite" aria-atomic="true"></p>
     <div id="gallery" class="gallery">
       <div class="placeholder">
         <div class="placeholder-icon">🔭</div>
         <p>Select a date range and click "Get Space Images" to explore the cosmos!</p>
       </div>
     </div>
+
+    <section class="space-facts" aria-labelledby="factsTitle">
+      <h2 id="factsTitle">Did You Know?</h2>
+      <p id="spaceFact"></p>
+    </section>
   </div>
+
+  <dialog id="entryModal" aria-labelledby="modalTitle">
+    <div class="modal-content">
+      <button id="closeModal" class="close-modal" type="button" aria-label="Close entry" title="Close entry" autofocus>&times;</button>
+      <h2 id="modalTitle"></h2>
+      <time id="modalDate"></time>
+      <div id="modalMedia" class="modal-media"></div>
+      <p id="modalExplanation"></p>
+    </div>
+  </dialog>
 
   <script src="js/dateRange.js"></script>
   <script src="js/script.js"></script>
